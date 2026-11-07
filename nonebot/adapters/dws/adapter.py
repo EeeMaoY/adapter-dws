@@ -688,7 +688,17 @@ class Adapter(BaseAdapter):
             self.dws_config.dws_as_bot and self.dws_config.dws_robot_code
         )
         if target_group:
-            target_args = ["--group", target_group]
+            if as_bot and not target_group.startswith("cid"):
+                raise ValueError(
+                    "bot 身份发送需要群 openConversationId（cid 开头），"
+                    "群名解析仅支持 user 身份"
+                )
+            # cid 走 --group；群名交给 dws --chat-query 唯一解析
+            target_args = (
+                ["--group", target_group]
+                if target_group.startswith("cid")
+                else ["--chat-query", target_group]
+            )
         elif target_user:
             # bot 批量单聊目标使用复数参数
             target_args = (
