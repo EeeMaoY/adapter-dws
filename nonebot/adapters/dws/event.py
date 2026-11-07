@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, PrivateAttr
@@ -204,10 +205,29 @@ class GroupMessageEvent(MessageEvent):
 
     _group_tome: bool = PrivateAttr(default=False)
 
+    @classmethod
+    def _build_message(cls, values: Dict[str, Any]) -> List[MessageSegment]:
+        """剥离 content 开头的 @ 提及 token 后再构建消息。
+
+        dws 事件负载不含 @ 元数据，被 @ 的对象名以 ``@名字(花名) ``
+        形式渲染在正文开头。按其它适配器「at 段不计入 plaintext」
+        的惯例将其剥离，原文保留在 ``raw_content`` extra 字段。
+        """
+        content = values.get("content")
+        if isinstance(content, str) and content.startswith("@"):
+            match = MENTION_PREFIX_RE.match(content)
+            if match:
+                values.setdefault("raw_content", content)
+                values["content"] = content[match.end() :]
+        return super()._build_message(values)
+
     @overrides(MessageEvent)
     def is_tome(self) -> bool:
         return self._group_tome
 
+
+MENTION_PREFIX_RE = re.compile(r"^@[^\s@]+(?:\([^)]*\))?\s*")
+"""群消息 content 开头的 @ 提及 token（如 ``@一猫(一猫) ``）。"""
 
 EVENT_CLASSES: Dict[str, type] = {
     EVENT_KEY_O2O_ALL: PrivateMessageEvent,
