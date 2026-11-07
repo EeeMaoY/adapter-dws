@@ -57,3 +57,13 @@ class Config(BaseModel):
 
     dws_group_is_tome: bool = False
     """群消息事件是否一律视为与机器人相关（dws 事件负载不含 @ 信息）。"""
+
+    dws_self_open_id: Optional[str] = None
+    """当前账号的 openDingTalkId，用于自发消息过滤。
+
+    缺省时适配器在首次自发消息回投时自动学习（outbox 匹配），
+    配置后可零误杀地从第一条消息开始过滤。
+    """
+
+    dws_loop_window: int = 60
+    """自发消息识别窗口（秒）：发送记录在该窗口内用于回环匹配。"""

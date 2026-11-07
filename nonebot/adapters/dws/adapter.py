@@ -2,9 +2,11 @@ import asyncio
 import json
 import re
 import signal
+import time
+from collections import OrderedDict, deque
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from nonebot.adapters import Adapter as BaseAdapter
 from nonebot.drivers import Driver
@@ -88,6 +90,12 @@ class Adapter(BaseAdapter):
         self.bot: Optional[Bot] = None
         self._listen_tasks: Dict[str, asyncio.Task] = {}
         self._stopping = False
+        # 自发消息回环防护：见 _consume_stdout / _match_outbox
+        self._own_open_ids: set = set()
+        if self.dws_config.dws_self_open_id:
+            self._own_open_ids.add(self.dws_config.dws_self_open_id)
+        self._outbox: Deque[Tuple[Optional[str], str, float]] = deque()
+        self._seen_events: OrderedDict = OrderedDict()
         self.on_ready(self._startup)
         self.driver.on_shutdown(self._shutdown)
 
@@ -384,6 +392,8 @@ class Adapter(BaseAdapter):
                     f"DWS | listen {kind} 收到非预期事件 {remote_key}，忽略"
                 )
                 continue
+            if self._is_suppressed(data):
+                continue
             try:
                 event = build_event(event_key, data)
             except Exception as e:
@@ -400,6 +410,78 @@ class Adapter(BaseAdapter):
                 logger.opt(exception=e).error(
                     f"DWS | 事件处理失败: {escape_tag(str(event))}"
                 )
+
+    # ------------------------------------------------------------------
+    # 自发消息回环防护
+
+    def _is_suppressed(self, data: Dict[str, Any]) -> bool:
+        """判断事件是否应被丢弃：重复投递 / 自己发送的消息。
+
+        dws 文档承诺的 self-loop 过滤在部分订阅上不可靠，这里做
+        适配器侧防护：
+
+        1. ``message_id`` LRU 去重，防同一事件重复投递；
+        2. 发送者 openDingTalkId 已知为自己（配置或 outbox 命中学习）；
+        3. 事件 ``(会话, 正文)`` 命中近期发送 outbox——首次命中时
+           学习发送者 ID，此后按 ID 精确过滤。
+        """
+        message_id = data.get("message_id")
+        if message_id:
+            if message_id in self._seen_events:
+                logger.debug(f"DWS | 丢弃重复投递事件 {message_id}")
+                return True
+            self._seen_events[message_id] = None
+            while len(self._seen_events) > 1024:
+                self._seen_events.popitem(last=False)
+
+        sender_id = data.get("sender_open_dingtalk_id") or ""
+        if sender_id and sender_id in self._own_open_ids:
+            logger.debug(f"DWS | 丢弃自发消息事件 {message_id or ''}")
+            return True
+
+        if self._match_outbox(
+            data.get("conversation_id") or "", str(data.get("content") or "")
+        ):
+            if sender_id:
+                self._own_open_ids.add(sender_id)
+                logger.info(
+                    f"DWS | 已学习自身 openDingTalkId "
+                    f"{escape_tag(sender_id)}，后续自发消息将被过滤"
+                )
+            logger.debug(f"DWS | 丢弃命中 outbox 的自发消息 {message_id or ''}")
+            return True
+        return False
+
+    def _record_outbox(self, conversation_id: Optional[str], content: str) -> None:
+        """记录一次成功发送，用于自发消息识别。"""
+        if not content:
+            return
+        now = time.monotonic()
+        self._outbox.append((conversation_id or None, content, now))
+        window = self.dws_config.dws_loop_window
+        while self._outbox and now - self._outbox[0][2] > window:
+            self._outbox.popleft()
+
+    def _match_outbox(self, conversation_id: str, content: str) -> bool:
+        """事件是否命中近期发送记录（群发送要求同会话，单聊仅匹配正文）。"""
+        if not content or not self._outbox:
+            return False
+        now = time.monotonic()
+        window = self.dws_config.dws_loop_window
+        matched = False
+        while self._outbox and now - self._outbox[0][2] > window:
+            self._outbox.popleft()
+        for entry in self._outbox:
+            entry_cid, entry_content, entry_ts = entry
+            if entry_content != content:
+                continue
+            if entry_cid is not None and entry_cid != conversation_id:
+                continue
+            if now - entry_ts <= window:
+                matched = True
+                self._outbox.remove(entry)
+                break
+        return matched
 
     @staticmethod
     async def _stop_process(
@@ -501,7 +583,12 @@ class Adapter(BaseAdapter):
         invocations = self._build_send_invocations(
             msg, target_group, target_user
         )
-        results = [await self.executor.run(**inv) for inv in invocations]
+        results = []
+        for invocation in invocations:
+            content = invocation.pop("_content", "")
+            result = await self.executor.run(**invocation)
+            results.append(result)
+            self._record_outbox(target_group, content)
         return results[-1] if len(results) == 1 else results
 
     async def _handle_reply(
@@ -532,9 +619,16 @@ class Adapter(BaseAdapter):
             args += ["--content", content]
         args += self._at_args(msg)
         args += self._misc_args()
-        return await self.executor.run(
+        result = await self.executor.run(
             args, input_text=stdin_text, confirm=True
         )
+        reply_cid = group_id or (
+            event.conversation_id
+            if isinstance(event, GroupMessageEvent)
+            else None
+        )
+        self._record_outbox(reply_cid, content)
+        return result
 
     @staticmethod
     def _resolve_target(
@@ -637,8 +731,13 @@ class Adapter(BaseAdapter):
                     "args": [*base, "--text", "-", "--body-stdin=true"],
                     "input_text": content,
                     "confirm": True,
+                    "_content": content,
                 }
-            return {"args": [*base, "--text", content], "confirm": True}
+            return {
+                "args": [*base, "--text", content],
+                "confirm": True,
+                "_content": content,
+            }
         if seg.type == "markdown":
             content = str(seg.data.get("content", ""))
             if not content:
@@ -648,8 +747,13 @@ class Adapter(BaseAdapter):
                     "args": [*base, "--markdown", "-", "--body-stdin=true"],
                     "input_text": content,
                     "confirm": True,
+                    "_content": content,
                 }
-            return {"args": [*base, "--markdown", content], "confirm": True}
+            return {
+                "args": [*base, "--markdown", content],
+                "confirm": True,
+                "_content": content,
+            }
         if seg.type == "image":
             media_id = seg.data.get("media_id")
             file = seg.data.get("file")

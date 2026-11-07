@@ -66,6 +66,8 @@ nonebot-adapter-dws = [
 | `dws_ai_tag` | `False` | 发送的消息是否带 AI 角标（dws 默认为 true） |
 | `dws_wait_delivery` | `False` | 发送后等待投递回执 |
 | `dws_group_is_tome` | `False` | 群消息事件是否一律视为与机器人相关 |
+| `dws_self_open_id` | `None` | 当前账号 openDingTalkId，用于自发消息过滤；缺省自动学习 |
+| `dws_loop_window` | `60` | 自发消息识别窗口（秒） |
 
 示例 `.env`：
 
@@ -121,6 +123,10 @@ result = await bot.call_api("dws", args=["chat", "+chat-messages", "--group", ci
 - 已读 / 撤回 / reaction 等 notice 类事件需要指定会话订阅，暂未启用
 - dws 事件负载不含 @ 信息与群名称，群消息的 `is_tome()` 由 `dws_group_is_tome` 配置决定
 - dws CLI 对本地订阅失败有保护机制（terminal hold），适配器重启用指数退避（5s 起，上限 10min）
+- **自发消息回环防护**：dws 文档承诺的 self-loop 过滤并不完全可靠，适配器内置三层防护——
+  `message_id` 去重、发送者 ID 过滤（配置 `dws_self_open_id` 或首次回投时自动学习）、
+  发送 outbox 匹配（窗口 `dws_loop_window` 秒内同会话同正文的事件判定为自发消息丢弃）。
+  文本消息可被完整防护；markdown 发送回投后的渲染文本与源码不同，无法参与 outbox 匹配
 
 ## 协议
 
