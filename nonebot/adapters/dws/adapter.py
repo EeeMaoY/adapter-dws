@@ -606,6 +606,8 @@ class Adapter(BaseAdapter):
             raise ValueError("无法确定发送目标")
 
         base = [
+            "chat",
+            "+messages-send",
             *self._identity_args(),
             *target_args,
             *self._at_args(msg),
