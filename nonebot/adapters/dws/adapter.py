@@ -105,6 +105,7 @@ class Adapter(BaseAdapter):
                 "DWS | dws 未登录，请先执行 `dws auth login --recommend` "
                 "完成钉钉登录后重启 NoneBot"
             )
+            await self._diagnose_unauthenticated()
             return
 
         self_id = self.dws_config.dws_self_id or await self._resolve_self_id(
@@ -148,6 +149,31 @@ class Adapter(BaseAdapter):
         except DwsAdapterError as e:
             logger.debug(f"DWS | profile list 失败: {e!r}")
             return None
+
+    async def _diagnose_unauthenticated(self) -> None:
+        """auth status 报未登录时的辅助诊断。
+
+        dws 需要在 ``~/.dws`` 获取文件锁；若进程无权写入该目录
+        （如被强制完整性标签限制），auth status 也会返回"未登录"，
+        此时给出真实根因提示。
+        """
+        try:
+            await self.executor.profile_list()
+        except DwsAdapterError as e:
+            detail = str(e)
+            if "Access is denied" in detail or "拒绝访问" in detail or "lock" in detail:
+                logger.error(
+                    "DWS | 诊断: dws 无法访问凭据目录（.data.lock 权限被拒）。"
+                    "当前进程可能运行在低完整性级别（目录带 Mandatory Label），"
+                    "请用管理员终端执行: "
+                    'icacls <项目目录> /setintegritylevel "(OI)(CI)M" /T /C '
+                    "后重试；详见 https://learn.microsoft.com/windows/security/"
+                    "identity-protection/mandatory-integrity-control"
+                )
+            else:
+                logger.debug(f"DWS | 诊断: profile list 错误: {detail}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"DWS | 诊断异常: {e!r}")
 
     @staticmethod
     def _extract_account(value: Any, require_current: bool) -> Optional[str]:

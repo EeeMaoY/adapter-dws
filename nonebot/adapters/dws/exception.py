@@ -1,3 +1,4 @@
+import json
 from typing import Any, Optional
 
 from nonebot.utils import escape_tag
@@ -25,8 +26,26 @@ class ProcessError(DwsAdapterError):
     def __init__(self, returncode: int, stderr: Optional[str] = None):
         self.returncode = returncode
         self.stderr = stderr
-        detail = escape_tag((stderr or "").strip().splitlines()[-1]) if stderr else ""
+        detail = ""
+        if stderr:
+            # stderr 可能是多行 JSON 错误，提取其中的 message 字段
+            message = _extract_error_message(stderr)
+            detail = escape_tag(message or " ".join(stderr.split())[:300])
         super().__init__(f"dws exited with code {returncode}: {detail}")
+
+
+def _extract_error_message(stderr: str) -> Optional[str]:
+    try:
+        data = json.loads(stderr.strip())
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if data.get("message"):
+            return str(data["message"])
+    return None
 
 
 class ReadyTimeoutError(DwsAdapterError):
