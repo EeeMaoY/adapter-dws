@@ -31,6 +31,14 @@ from .process import CREATE_NO_WINDOW, DWSExecutor
 READY_RE = re.compile(r"\[event\]\s*ready")
 """dws 订阅就绪标记。"""
 
+NON_RETRYABLE_MARKERS = (
+    "unknown flag",
+    "unknown_flag",
+    "unknown command",
+    "unknown_command",
+)
+"""dws 参数校验类错误为确定性失败，重试无意义。"""
+
 KIND_TO_FLAG: Dict[str, str] = {
     "direct": "all-direct",
     "group": "all-group",
@@ -153,27 +161,45 @@ class Adapter(BaseAdapter):
     async def _diagnose_unauthenticated(self) -> None:
         """auth status 报未登录时的辅助诊断。
 
-        dws 需要在 ``~/.dws`` 获取文件锁；若进程无权写入该目录
-        （如被强制完整性标签限制），auth status 也会返回"未登录"，
-        此时给出真实根因提示。
+        dws 需要在 ``~/.dws`` 获取文件锁；锁获取失败时 auth status
+        统一返回"未登录"。常见原因：锁被其他 dws 实例占用，或
+        当前进程无权写入（低完整性级别目录标签）。此处探测区分。
         """
         try:
             await self.executor.profile_list()
         except DwsAdapterError as e:
             detail = str(e)
             if "Access is denied" in detail or "拒绝访问" in detail or "lock" in detail:
-                logger.error(
-                    "DWS | 诊断: dws 无法访问凭据目录（.data.lock 权限被拒）。"
-                    "当前进程可能运行在低完整性级别（目录带 Mandatory Label），"
-                    "请用管理员终端执行: "
-                    'icacls <项目目录> /setintegritylevel "(OI)(CI)M" /T /C '
-                    "后重试；详见 https://learn.microsoft.com/windows/security/"
-                    "identity-protection/mandatory-integrity-control"
-                )
+                if self._lock_writable():
+                    logger.error(
+                        "DWS | 诊断: dws 数据锁获取失败，但锁文件本身可写，"
+                        "可能另有 dws 实例正在运行（如之前启动的 bot 或"
+                        "其他终端会话），请停止其他 dws 进程后重试"
+                    )
+                else:
+                    logger.error(
+                        "DWS | 诊断: 当前进程无法写入凭据目录（.data.lock "
+                        "权限被拒）。进程可能运行在低完整性级别（目录带 "
+                        "Mandatory Label），请用管理员终端执行: "
+                        'icacls <项目目录> /setintegritylevel "(OI)(CI)M" /T /C '
+                        "后重试；详见 https://learn.microsoft.com/windows/"
+                        "security/identity-protection/"
+                        "mandatory-integrity-control"
+                    )
             else:
                 logger.debug(f"DWS | 诊断: profile list 错误: {detail}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug(f"DWS | 诊断异常: {e!r}")
+
+    @staticmethod
+    def _lock_writable() -> bool:
+        """探测当前进程能否写入 dws 数据锁文件。"""
+        lock_path = Path.home() / ".dws" / ".data.lock"
+        try:
+            with open(lock_path, "r+b"):
+                return True
+        except OSError:
+            return False
 
     @staticmethod
     def _extract_account(value: Any, require_current: bool) -> Optional[str]:
@@ -221,6 +247,13 @@ class Adapter(BaseAdapter):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                message = str(e)
+                if any(marker in message for marker in NON_RETRYABLE_MARKERS):
+                    logger.error(
+                        f"DWS | listen {kind} 参数被 dws 拒绝，不再重试: "
+                        f"{escape_tag(message)}"
+                    )
+                    return
                 logger.opt(exception=e).warning(
                     f"DWS | listen {kind} 退出: {e!r}"
                 )
@@ -240,6 +273,7 @@ class Adapter(BaseAdapter):
             await asyncio.sleep(delay)
 
     async def _listen_once(self, bot: Bot, kind: str) -> None:
+        # +listen-im 的 NDJSON 输出本身即扁平事件流，无 --flatten flag
         args = [
             *self.executor._global_args(),
             "event",
@@ -248,7 +282,6 @@ class Adapter(BaseAdapter):
             KIND_TO_FLAG[kind],
             "--events",
             "message",
-            "--flatten",
             "-f",
             "ndjson",
         ]
@@ -281,18 +314,21 @@ class Adapter(BaseAdapter):
 
     async def _wait_ready(self, proc: asyncio.subprocess.Process, kind: str) -> None:
         assert proc.stderr is not None
+        recent: List[str] = []
 
         async def _read_until_ready() -> None:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
                     await proc.wait()
+                    detail = " ".join(recent[-40:]).strip()
                     raise ProcessError(
                         proc.returncode or -1,
-                        f"listen {kind} 在 ready 前退出",
+                        detail or f"listen {kind} 在 ready 前退出（无诊断输出）",
                     )
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
+                    recent.append(text)
                     logger.debug(f"DWS | [listen {kind}] {text}")
                 if READY_RE.search(text):
                     logger.info(f"DWS | listen {kind} ready: {text}")

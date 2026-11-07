@@ -37,7 +37,7 @@ class ProcessError(DwsAdapterError):
 def _extract_error_message(stderr: str) -> Optional[str]:
     try:
         data = json.loads(stderr.strip())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     if isinstance(data, dict):
         error = data.get("error")
