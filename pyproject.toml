@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nonebot-adapter-dws"
-version = "1.0.0"
+version = "1.0.1a1"
 description = "DingTalk DWS adapter for nonebot2"
 authors = ["EeeMao <my1634325882@163.com>"]
 license = "MIT"

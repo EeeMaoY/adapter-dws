@@ -21,7 +21,7 @@ from .exception import (
 from .message import Message, MessageSegment
 from .process import DWSExecutor
 
-__version__ = "1.0.0"
+__version__ = "1.0.1a1"
 
 __all__ = [
     "EVENT_KEY_GROUP_ALL",
