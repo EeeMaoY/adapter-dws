@@ -8,12 +8,12 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from typing_extensions import override
+
+from nonebot import get_plugin_config
 from nonebot.adapters import Adapter as BaseAdapter
 from nonebot.drivers import Driver
 from nonebot.exception import ApiNotAvailable
-from nonebot.log import logger
-from nonebot.message import handle_event
-from nonebot.typing import overrides
 from nonebot.utils import escape_tag
 
 from .bot import Bot
@@ -21,6 +21,7 @@ from .config import Config
 from .event import (
     EVENT_KEY_GROUP_ALL,
     EVENT_KEY_O2O_ALL,
+    DwsEvent,
     GroupMessageEvent,
     MessageEvent,
     PrivateMessageEvent,
@@ -29,6 +30,7 @@ from .event import (
 from .exception import DwsAdapterError, ProcessError, ReadyTimeoutError
 from .message import Message
 from .process import CREATE_NO_WINDOW, DWSExecutor
+from .utils import log
 
 READY_RE = re.compile(r"\[event\]\s*ready")
 """dws 订阅就绪标记。"""
@@ -85,7 +87,7 @@ class Adapter(BaseAdapter):
 
     def __init__(self, driver: Driver, **kwargs: Any):
         super().__init__(driver, **kwargs)
-        self.dws_config = Config(**driver.config.dict())
+        self.dws_config: Config = get_plugin_config(Config)
         self.executor = DWSExecutor(self.dws_config)
         self.bot: Optional[Bot] = None
         self._listen_tasks: Dict[str, asyncio.Task] = {}
@@ -100,9 +102,20 @@ class Adapter(BaseAdapter):
         self.driver.on_shutdown(self._shutdown)
 
     @classmethod
-    @overrides(BaseAdapter)
+    @override
     def get_name(cls) -> str:
         return "DingTalk"
+
+    @classmethod
+    def payload_to_event(
+        cls, payload: Dict[str, Any], event_key: str
+    ) -> DwsEvent:
+        """把 dws 扁平事件负载转换为具体 Event。
+
+        解析失败时由调用方记录告警并丢弃该事件（dws 负载字段
+        可能随服务端变更）。
+        """
+        return build_event(event_key, payload)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -111,14 +124,14 @@ class Adapter(BaseAdapter):
         try:
             status = await self.executor.auth_status()
         except DwsAdapterError as e:
-            logger.error(
-                f"DWS | dws auth status 执行失败: {e!r}；"
+            log("ERROR", 
+                f"dws auth status 执行失败: {e!r}；"
                 f"请确认已安装 dws CLI（npm install -g dingtalk-workspace-cli）"
             )
             return
         if not (isinstance(status, dict) and status.get("authenticated")):
-            logger.error(
-                "DWS | dws 未登录，请先执行 `dws auth login --recommend` "
+            log("ERROR", 
+                "dws 未登录，请先执行 `dws auth login --recommend` "
                 "完成钉钉登录后重启 NoneBot"
             )
             await self._diagnose_unauthenticated()
@@ -128,17 +141,15 @@ class Adapter(BaseAdapter):
             status
         )
         if self.dws_config.dws_as_bot and not self.dws_config.dws_robot_code:
-            logger.warning(
-                "DWS | 已启用 dws_as_bot 但未配置 dws_robot_code，"
+            log("WARNING", 
+                "已启用 dws_as_bot 但未配置 dws_robot_code，"
                 "发送将回退为用户身份"
             )
 
         bot = Bot(self, self_id)
         self.bot = bot
         self.bot_connect(bot)
-        logger.opt(colors=True).info(
-            f"DWS | Bot <y>{escape_tag(self_id)}</y> 已连接"
-        )
+        log("INFO", f"Bot {escape_tag(self_id)} 已连接")
 
         for kind in self.dws_config.dws_listen_kinds:
             task = asyncio.create_task(self._listen_loop(bot, kind))
@@ -153,8 +164,8 @@ class Adapter(BaseAdapter):
             account = self._extract_account(source, require_current=False)
             if account:
                 return account
-        logger.warning(
-            "DWS | 无法从登录账号提取 self_id，回退为 dingtalk-dws"
+        log("WARNING", 
+            "无法从登录账号提取 self_id，回退为 dingtalk-dws"
             "（可通过 dws_self_id 配置指定）"
         )
         return "dingtalk-dws"
@@ -163,7 +174,7 @@ class Adapter(BaseAdapter):
         try:
             return await self.executor.profile_list()
         except DwsAdapterError as e:
-            logger.debug(f"DWS | profile list 失败: {e!r}")
+            log("DEBUG", f"profile list 失败: {e!r}")
             return None
 
     async def _diagnose_unauthenticated(self) -> None:
@@ -179,14 +190,14 @@ class Adapter(BaseAdapter):
             detail = str(e)
             if "Access is denied" in detail or "拒绝访问" in detail or "lock" in detail:
                 if self._lock_writable():
-                    logger.error(
-                        "DWS | 诊断: dws 数据锁获取失败，但锁文件本身可写，"
+                    log("ERROR", 
+                        "诊断: dws 数据锁获取失败，但锁文件本身可写，"
                         "可能另有 dws 实例正在运行（如之前启动的 bot 或"
                         "其他终端会话），请停止其他 dws 进程后重试"
                     )
                 else:
-                    logger.error(
-                        "DWS | 诊断: 当前进程无法写入凭据目录（.data.lock "
+                    log("ERROR", 
+                        "诊断: 当前进程无法写入凭据目录（.data.lock "
                         "权限被拒）。进程可能运行在低完整性级别（目录带 "
                         "Mandatory Label），请用管理员终端执行: "
                         'icacls <项目目录> /setintegritylevel "(OI)(CI)M" /T /C '
@@ -195,9 +206,9 @@ class Adapter(BaseAdapter):
                         "mandatory-integrity-control"
                     )
             else:
-                logger.debug(f"DWS | 诊断: profile list 错误: {detail}")
+                log("DEBUG", f"诊断: profile list 错误: {detail}")
         except Exception as e:
-            logger.debug(f"DWS | 诊断异常: {e!r}")
+            log("DEBUG", f"诊断异常: {e!r}")
 
     @staticmethod
     def _lock_writable() -> bool:
@@ -257,25 +268,23 @@ class Adapter(BaseAdapter):
             except Exception as e:
                 message = str(e)
                 if any(marker in message for marker in NON_RETRYABLE_MARKERS):
-                    logger.error(
-                        f"DWS | listen {kind} 参数被 dws 拒绝，不再重试: "
+                    log("ERROR", 
+                        f"listen {kind} 参数被 dws 拒绝，不再重试: "
                         f"{escape_tag(message)}"
                     )
                     return
-                logger.opt(exception=e).warning(
-                    f"DWS | listen {kind} 退出: {e!r}"
-                )
+                log("WARNING", f"listen {kind} 退出: {e!r}", e)
             attempts += 1
             if attempts > self.dws_config.dws_restart_max:
-                logger.error(
-                    f"DWS | listen {kind} 连续失败 {attempts} 次，停止重启；"
+                log("ERROR", 
+                    f"listen {kind} 连续失败 {attempts} 次，停止重启；"
                     f"dws 对订阅失败有本地保护（terminal hold），"
                     f"请排查后重启 NoneBot"
                 )
                 return
             delay = min(5 * 2 ** (attempts - 1), 600)
-            logger.info(
-                f"DWS | listen {kind} 将在 {delay}s 后重启"
+            log("INFO", 
+                f"listen {kind} 将在 {delay}s 后重启"
                 f"（第 {attempts}/{self.dws_config.dws_restart_max} 次）"
             )
             await asyncio.sleep(delay)
@@ -307,7 +316,7 @@ class Adapter(BaseAdapter):
                 -1,
                 f"无法启动 dws listen（{self.executor.exec_path}）: {e}",
             ) from e
-        logger.debug(f"DWS | listen {kind} pid={proc.pid}")
+        log("DEBUG", f"listen {kind} pid={proc.pid}")
         try:
             await self._wait_ready(proc, kind)
             drain_task = asyncio.create_task(self._drain_stderr(proc, kind))
@@ -337,9 +346,9 @@ class Adapter(BaseAdapter):
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
                     recent.append(text)
-                    logger.debug(f"DWS | [listen {kind}] {text}")
+                    log("DEBUG", f"[listen {kind}] {text}")
                 if READY_RE.search(text):
-                    logger.info(f"DWS | listen {kind} ready: {text}")
+                    log("INFO", f"listen {kind} ready: {text}")
                     return
 
         try:
@@ -362,7 +371,7 @@ class Adapter(BaseAdapter):
                 return
             text = line.decode("utf-8", errors="replace").strip()
             if text:
-                logger.debug(f"DWS | [listen {kind}] {text}")
+                log("DEBUG", f"[listen {kind}] {text}")
 
     async def _consume_stdout(
         self, bot: Bot, kind: str, proc: asyncio.subprocess.Process
@@ -378,8 +387,8 @@ class Adapter(BaseAdapter):
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                logger.warning(
-                    f"DWS | listen {kind} 忽略非 NDJSON 行: "
+                log("WARNING", 
+                    f"listen {kind} 忽略非 NDJSON 行: "
                     f"{escape_tag(text[:120])}"
                 )
                 continue
@@ -388,28 +397,25 @@ class Adapter(BaseAdapter):
             event_key = KIND_TO_EVENT_KEY[kind]
             remote_key = data.get("type") or event_key
             if remote_key != event_key:
-                logger.debug(
-                    f"DWS | listen {kind} 收到非预期事件 {remote_key}，忽略"
+                log("DEBUG", 
+                    f"listen {kind} 收到非预期事件 {remote_key}，忽略"
                 )
                 continue
             if self._is_suppressed(data):
                 continue
             try:
-                event = build_event(event_key, data)
+                event = self.payload_to_event(data, event_key)
             except Exception as e:
-                logger.opt(exception=e).warning(
-                    f"DWS | listen {kind} 事件解析失败: "
-                    f"{escape_tag(text[:200])}"
+                log(
+                    "WARNING",
+                    f"listen {kind} 事件解析失败: {escape_tag(text[:200])}",
+                    e,
                 )
                 continue
-            if isinstance(event, GroupMessageEvent):
-                event._group_tome = self.dws_config.dws_group_is_tome
             try:
-                await handle_event(bot, event)
+                await bot.handle_event(event)
             except Exception as e:
-                logger.opt(exception=e).error(
-                    f"DWS | 事件处理失败: {escape_tag(str(event))}"
-                )
+                log("ERROR", f"事件处理失败: {escape_tag(str(event))}", e)
 
     # ------------------------------------------------------------------
     # 自发消息回环防护
@@ -428,7 +434,7 @@ class Adapter(BaseAdapter):
         message_id = data.get("message_id")
         if message_id:
             if message_id in self._seen_events:
-                logger.debug(f"DWS | 丢弃重复投递事件 {message_id}")
+                log("DEBUG", f"丢弃重复投递事件 {message_id}")
                 return True
             self._seen_events[message_id] = None
             while len(self._seen_events) > 1024:
@@ -436,7 +442,7 @@ class Adapter(BaseAdapter):
 
         sender_id = data.get("sender_open_dingtalk_id") or ""
         if sender_id and sender_id in self._own_open_ids:
-            logger.debug(f"DWS | 丢弃自发消息事件 {message_id or ''}")
+            log("DEBUG", f"丢弃自发消息事件 {message_id or ''}")
             return True
 
         if self._match_outbox(
@@ -444,11 +450,11 @@ class Adapter(BaseAdapter):
         ):
             if sender_id:
                 self._own_open_ids.add(sender_id)
-                logger.info(
-                    f"DWS | 已学习自身 openDingTalkId "
+                log("INFO", 
+                    f"已学习自身 openDingTalkId "
                     f"{escape_tag(sender_id)}，后续自发消息将被过滤"
                 )
-            logger.debug(f"DWS | 丢弃命中 outbox 的自发消息 {message_id or ''}")
+            log("DEBUG", f"丢弃命中 outbox 的自发消息 {message_id or ''}")
             return True
         return False
 
@@ -507,23 +513,23 @@ class Adapter(BaseAdapter):
         except ProcessLookupError:
             return
         except Exception as e:
-            logger.debug(f"DWS | listen {kind} 发送退出信号失败: {e!r}")
+            log("DEBUG", f"listen {kind} 发送退出信号失败: {e!r}")
         if graceful:
             try:
                 await asyncio.wait_for(proc.wait(), 5)
             except asyncio.TimeoutError:
-                logger.debug(
-                    f"DWS | listen {kind} 未在宽限期内退出，terminate"
+                log("DEBUG", 
+                    f"listen {kind} 未在宽限期内退出，terminate"
                 )
             else:
-                logger.debug(f"DWS | listen {kind} 已干净退出")
+                log("DEBUG", f"listen {kind} 已干净退出")
                 return
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), 5)
         except asyncio.TimeoutError:
-            logger.warning(
-                f"DWS | listen {kind} terminate 后仍未退出，放弃等待"
+            log("WARNING", 
+                f"listen {kind} terminate 后仍未退出，放弃等待"
             )
         except ProcessLookupError:
             pass
@@ -531,7 +537,7 @@ class Adapter(BaseAdapter):
     # ------------------------------------------------------------------
     # API 路由
 
-    @overrides(BaseAdapter)
+    @override
     async def _call_api(self, bot: Bot, api: str, **data: Any) -> Any:
         if api == "send_message":
             return await self._handle_send(**data)

@@ -23,7 +23,8 @@ exclude = ["nonebot/__init__.py", "nonebot/adapters/__init__.py"]
 
 [tool.poetry.dependencies]
 python = "^3.9"
-nonebot2 = "^2.0.0"
+nonebot2 = "^2.5.0"
+typing-extensions = ">=4.0"
 
 [tool.poetry.dev-dependencies]
 nonebot2 = { git = "https://github.com/nonebot/nonebot2.git", branch = "dev" }

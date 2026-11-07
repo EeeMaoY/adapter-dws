@@ -1,10 +1,12 @@
 from typing import TYPE_CHECKING, Any, Union
 
+from typing_extensions import override
+
 from nonebot.adapters import Bot as BaseBot
-from nonebot.typing import overrides
+from nonebot.message import handle_event
 
 from .config import Config
-from .event import MessageEvent
+from .event import DwsEvent, GroupMessageEvent, MessageEvent
 from .message import Message, MessageSegment
 
 if TYPE_CHECKING:
@@ -18,6 +20,8 @@ class Bot(BaseBot):
 
     - 私聊事件：``--open-dingtalk-id <sender_open_dingtalk_id>``
     - 群聊事件：``--group <conversation_id>``
+
+    ``handle_event`` 在事件进入框架前做预处理（群消息 ``is_tome``）。
     """
 
     adapter: "Adapter"
@@ -27,7 +31,17 @@ class Bot(BaseBot):
         """适配器配置。"""
         return self.adapter.dws_config
 
-    @overrides(BaseBot)
+    async def handle_event(self, event: DwsEvent) -> None:
+        """事件预处理后交由 NoneBot 处理。
+
+        dws 事件负载不含 @ 元数据，群消息的 ``is_tome`` 由
+        ``dws_group_is_tome`` 配置在此处写入。
+        """
+        if isinstance(event, GroupMessageEvent):
+            event._group_tome = self.dws_config.dws_group_is_tome
+        await handle_event(self, event)
+
+    @override
     async def send(
         self,
         event: MessageEvent,

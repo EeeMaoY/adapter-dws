@@ -2,10 +2,11 @@ import re
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, PrivateAttr
+from typing_extensions import override
 
 from nonebot.adapters import Event as BaseEvent
 from nonebot.compat import PYDANTIC_V2, ConfigDict, type_validate_python
-from nonebot.typing import overrides
+from nonebot.utils import escape_tag
 
 from .message import Message, MessageSegment
 
@@ -54,31 +55,31 @@ class DwsEvent(BaseEvent):
     subscribe_id: str = ""
     """订阅 ID。"""
 
-    @overrides(BaseEvent)
+    @override
     def get_type(self) -> str:
         return "message"
 
-    @overrides(BaseEvent)
+    @override
     def get_event_name(self) -> str:
         return self.type
 
-    @overrides(BaseEvent)
+    @override
     def get_event_description(self) -> str:
-        return self.event_id
+        return escape_tag(self.event_id)
 
-    @overrides(BaseEvent)
+    @override
     def get_message(self) -> Message:
         raise NotImplementedError
 
-    @overrides(BaseEvent)
+    @override
     def get_user_id(self) -> str:
         raise NotImplementedError
 
-    @overrides(BaseEvent)
+    @override
     def get_session_id(self) -> str:
         raise NotImplementedError
 
-    @overrides(BaseEvent)
+    @override
     def is_tome(self) -> bool:
         return False
 
@@ -165,25 +166,25 @@ class MessageEvent(DwsEvent):
             values.setdefault("message", Message(cls._build_message(values)))
             return values
 
-    @overrides(DwsEvent)
+    @override
     def get_event_description(self) -> str:
-        return (
+        return escape_tag(
             f'Message {self.message_id} from {self.sender} "{self.content}"'
         )
 
-    @overrides(DwsEvent)
+    @override
     def get_message(self) -> Message:
         return self.message
 
-    @overrides(DwsEvent)
+    @override
     def get_user_id(self) -> str:
         return self.sender_open_dingtalk_id
 
-    @overrides(DwsEvent)
+    @override
     def get_session_id(self) -> str:
         return self.conversation_id
 
-    @overrides(DwsEvent)
+    @override
     def get_plaintext(self) -> str:
         return self.content
 
@@ -191,7 +192,7 @@ class MessageEvent(DwsEvent):
 class PrivateMessageEvent(MessageEvent):
     """单聊消息事件（``user_im_message_receive_o2o_all``）。"""
 
-    @overrides(MessageEvent)
+    @override
     def is_tome(self) -> bool:
         return True
 
@@ -221,7 +222,7 @@ class GroupMessageEvent(MessageEvent):
                 values["content"] = content[match.end() :]
         return super()._build_message(values)
 
-    @overrides(MessageEvent)
+    @override
     def is_tome(self) -> bool:
         return self._group_tome
 

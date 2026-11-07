@@ -5,10 +5,9 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
-from nonebot.log import logger
-
 from .config import Config
 from .exception import ActionFailed, ProcessError
+from .utils import log
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -49,9 +48,7 @@ class DWSExecutor:
         self.config = config
         self.exec_path = resolve_dws_exec(config.dws_exec)
         if self.exec_path != config.dws_exec:
-            logger.debug(
-                f"DWS | dws 可执行文件解析: {config.dws_exec} -> {self.exec_path}"
-            )
+            log("DEBUG", f"dws 可执行文件解析: {config.dws_exec} -> {self.exec_path}")
 
     def _global_args(self) -> List[str]:
         args: List[str] = []
@@ -83,7 +80,7 @@ class DWSExecutor:
         if not any(flag in args for flag in ("--format", "-f")):
             cmd += ["--format", "json"]
 
-        logger.debug(f"dws exec: {cmd}")
+        log("DEBUG", f"dws exec: {cmd}")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
